@@ -18,6 +18,21 @@ class PromptedFilter(OperatorABC):
         self.prompted_evaluator = PromptedEvaluator(llm_serving, system_prompt)
         self.min_score = min_score
         self.max_score = max_score
+
+    @staticmethod
+    def _has_valid_content(value) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return value.strip() != ""
+        if isinstance(value, (list, tuple, set, dict)):
+            return len(value) > 0
+        try:
+            if pd.isna(value):
+                return False
+        except TypeError:
+            pass
+        return bool(value)
     
     @staticmethod
     def get_desc(lang: str = "zh"):
@@ -70,12 +85,18 @@ class PromptedFilter(OperatorABC):
         dataframe = storage.read('dataframe')
         self.logger.info(f"Loading, number of rows: {len(dataframe)}")
 
+        # Drop rows where input_key is empty/null before evaluation
+        valid_mask = dataframe[input_key].apply(self._has_valid_content)
+        valid_dataframe = dataframe[valid_mask]
+        self.logger.info(f"Skipping {(~valid_mask).sum()} rows with empty '{input_key}'")
+
         # Create a list to hold all generated questions and answers
-        generated_outputs = self.prompted_evaluator.eval(dataframe, input_key)
+        generated_outputs = self.prompted_evaluator.eval(valid_dataframe, input_key)
 
         # Add the generated content back to the dataframe
-        dataframe[output_key] = generated_outputs
-        filtered_dataframe = dataframe[(dataframe[output_key] >= self.min_score) & (dataframe[output_key] <= self.max_score)]
+        valid_dataframe = valid_dataframe.copy()
+        valid_dataframe[output_key] = generated_outputs
+        filtered_dataframe = valid_dataframe[(valid_dataframe[output_key] >= self.min_score) & (valid_dataframe[output_key] <= self.max_score)]
         # Save the updated dataframe to the output file
         output_file = storage.write(filtered_dataframe)
         return output_key
