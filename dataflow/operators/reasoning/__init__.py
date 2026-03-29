@@ -26,6 +26,12 @@ if TYPE_CHECKING:
     from .filter.reasoning_question_filter import ReasoningQuestionFilter
     from .filter.reasoning_answer_model_judge_filter import ReasoningAnswerModelJudgeFilter
 
+    # refine – long-CoT post-processing (offline compression / cleaning)
+    from .refine.cot_llm_judge_refiner import CoTLLMJudgeRefiner
+    from .refine.cot_monte_carlo_refiner import CoTMonteCarloRefiner
+    from .refine.cot_chunk_compress_refiner import CoTChunkCompressRefiner
+    from .refine.cot_pattern_refiner import CoTPatternRefiner
+
 else:
     import sys
     from dataflow.utils.registry import LazyLoader, generate_import_structure_from_type_checking
