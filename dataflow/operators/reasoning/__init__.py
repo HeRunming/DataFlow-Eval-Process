@@ -26,6 +26,17 @@ if TYPE_CHECKING:
     from .filter.reasoning_question_filter import ReasoningQuestionFilter
     from .filter.reasoning_answer_model_judge_filter import ReasoningAnswerModelJudgeFilter
 
+    # stem rewrite
+    from .filter.stem_question_noise_filter import StemQuestionNoiseFilter
+    from .filter.stem_true_false_preprocessor_filter import StemTrueFalsePreprocessorFilter
+    from .filter.stem_answer_leak_filter import StemAnswerLeakFilter
+    from .generate.stem_true_false_rewriter_generator import StemTrueFalseRewriterGenerator
+    from .generate.stem_column_align_generator import StemColumnAlignGenerator
+    from .filter.stem_mc_preprocessor_filter import StemMCPreprocessorFilter
+    from .filter.stem_mc_answer_leak_filter import StemMCAnswerLeakFilter
+    from .generate.stem_mc_to_openended_rewriter_generator import StemMCToOpenEndedRewriterGenerator
+    from .eval.stem_subject_tagger_sample_evaluator import StemSubjectTaggerSampleEvaluator
+
 else:
     import sys
     from dataflow.utils.registry import LazyLoader, generate_import_structure_from_type_checking

@@ -1,0 +1,387 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    STEM MC → OPEN-ENDED PIPELINE ARCHITECTURE               ║
+║                          DataFlow / Reasoning Module                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+DIRECTORY STRUCTURE
+═══════════════════════════════════════════════════════════════════════════════
+
+/data/workspace/DataFlow/
+├── dataflow/
+│   ├── prompts/reasoning/
+│   │   └── stem.py
+│   │       ├── StemMCRewritePrompt
+│   │       ├── StemMCAnswerLeakDetectionPrompt
+│   │       ├── StemSubjectTaggingPrompt
+│   │       ├── StemTrueFalseRewritePrompt (reference)
+│   │       └── StemAnswerLeakDetectionPrompt (reference)
+│   │
+│   └── operators/reasoning/
+│       ├── filter/
+│       │   ├── stem_mc_preprocessor_filter.py → StemMCPreprocessorFilter
+│       │   ├── stem_mc_answer_leak_filter.py → StemMCAnswerLeakFilter
+│       │   └── reasoning_answer_ngram_filter.py → ReasoningAnswerNgramFilter
+│       ├── generate/
+│       │   ├── stem_mc_to_openended_rewriter_generator.py → StemMCToOpenEndedRewriterGenerator
+│       │   └── stem_column_align_generator.py → StemColumnAlignGenerator
+│       └── eval/
+│           └── stem_subject_tagger_sample_evaluator.py → StemSubjectTaggerSampleEvaluator
+│
+└── statics/pipelines/api_pipelines/
+    └── stem_mc_to_openended_pipeline.py → StemMCToOpenEndedPipeline
+
+PIPELINE DATA FLOW (6 Steps)
+═══════════════════════════════════════════════════════════════════════════════
+
+Step 0: PREPROCESSING (Rule-based)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ StemMCPreprocessorFilter (filter/stem_mc_preprocessor_filter.py)            │
+│                                                                             │
+│ INPUT: question, text                                                       │
+│   question: "题目：{关于DNA... A. ... B. ... C. ... D. ...}"                 │
+│   text: "ABCD" (or "A,B,D" or various formats)                              │
+│                                                                             │
+│ OPERATIONS:                                                                 │
+│   1. Extract core proposition (remove wrapper: "题目：{...}")               │
+│   2. Normalize answer labels → "A,B,D" format                               │
+│   3. Fix M1 format (inline options → add line breaks)                       │
+│   4. Parse options → option_a, option_b, option_c, option_d                │
+│   5. Filter invalid records (empty question, empty answer, insufficient options)
+│                                                                             │
+│ OUTPUT: question_clean, answer_label, options_text, option_a/b/c/d,        │
+│         num_options                                                         │
+│ KEEP RATE: ~98%                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      ↓
+
+Step 1: REWRITING (LLM-based)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ StemMCToOpenEndedRewriterGenerator (generate/stem_mc_to_openended_rewriter_generator.py)
+│                                                                             │
+│ PROMPT: StemMCRewritePrompt (prompts/reasoning/stem.py)                     │
+│   - Auto-detects Chinese/English                                           │
+│   - Few-shot examples included                                             │
+│   - Emphasizes neutrality & no answer leakage                              │
+│                                                                             │
+│ INPUT:                                                                      │
+│   question_clean: "关于DNA复制，下列说法正确的是..."                         │
+│   options_text: "A. DNA复制是半保留复制\n B. 复制过程需要解旋酶..."          │
+│                                                                             │
+│ LLM PROCESSING:                                                             │
+│   - Pass question + options to LLM with bilingual Few-Shot                  │
+│   - LLM generates neutral rewrite                                           │
+│   - Post-process output:                                                    │
+│     * Remove prefixes ("改写后:", "Rewritten:")                             │
+│     * Remove think tags (<think>...</think>)                                │
+│     * Remove markdown headers                                               │
+│                                                                             │
+│ OUTPUT: question_rewritten                                                  │
+│   "请说明DNA复制的机制和过程，包括：(1) 复制方式的特点；(2) 所需酶的作用...│
+│                                                                             │
+│ KEEP RATE: 100% (with empty filtering)                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      ↓
+
+Step 2: ANSWER LEAK DETECTION (LLM Judge)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ StemMCAnswerLeakFilter (filter/stem_mc_answer_leak_filter.py)              │
+│                                                                             │
+│ PROMPT: StemMCAnswerLeakDetectionPrompt (prompts/reasoning/stem.py)        │
+│   - Evaluates if rewritten question reveals correct answers                │
+│   - Identifies 5 leak types:                                               │
+│     1. direct_indication (states correct options directly)                 │
+│     2. implicit_selection (structure implies some options matter more)     │
+│     3. answer_mirroring (logic mirrors correct answer pattern)             │
+│     4. forced_analysis (only feasible path leads to correct answers)       │
+│     5. terminology_bias (word choice suggests certain answers)             │
+│                                                                             │
+│ INPUT:                                                                      │
+│   question_rewritten: "请说明DNA复制的机制..."                              │
+│   answer_label: "A,B,C,D"                                                   │
+│   options_text: (original options)                                          │
+│                                                                             │
+│ LLM JUDGE OUTPUT:                                                           │
+│   {                                                                         │
+│     "has_leak": false/true,                                                │
+│     "leak_type": "<type>" or null,                                         │
+│     "confidence": "high|medium|low"                                        │
+│   }                                                                         │
+│                                                                             │
+│ FILTERING:                                                                  │
+│   - Keep: has_leak = false ✓                                                │
+│   - Filter: has_leak = true ✗                                               │
+│                                                                             │
+│ KEEP RATE: ~85-90% (some questions have subtle answer leakage)             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      ↓
+
+Step 3: N-GRAM DEDUPLICATION (Rule-based)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ ReasoningAnswerNgramFilter (filter/reasoning_answer_ngram_filter.py)      │
+│                                                                             │
+│ OPERATION:                                                                  │
+│   - Compare question_clean (reference) vs question_rewritten (rewrite)     │
+│   - Calculate n-gram similarity (5-gram)                                    │
+│   - Keep only if ≥30% new n-grams (min_score=0.3)                         │
+│   - Filter samples where rewrite too similar to original                    │
+│                                                                             │
+│ PURPOSE: Ensure substantial rewriting, not just minor rewording            │
+│                                                                             │
+│ KEEP RATE: ~95% (minor n-gram dedup filtering)                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      ↓
+
+Step 4: COLUMN ALIGNMENT (Rule-based)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ StemColumnAlignGenerator (generate/stem_column_align_generator.py)         │
+│                                                                             │
+│ OPERATION:                                                                  │
+│   - Rename field: question_rewritten → question                            │
+│   - Keep only open_ended format columns:                                    │
+│     * answer_model, dataset_name, id, not_zh, ori, std_answer_model,      │
+│     * text, title, question                                                │
+│   - Drop intermediate processing columns                                    │
+│                                                                             │
+│ OUTPUT: DataFrame aligned to open_ended dataset schema                     │
+│                                                                             │
+│ KEEP RATE: 100% (pure column transformation)                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      ↓
+
+Step 5: SUBJECT TAGGING (LLM-based)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ StemSubjectTaggerSampleEvaluator (eval/stem_subject_tagger_sample_evaluator.py)
+│                                                                             │
+│ PROMPT: StemSubjectTaggingPrompt (prompts/reasoning/stem.py)               │
+│   - 6 subject categories: Math, Physics, Chemistry, Biology, CS, Other    │
+│   - Outputs confidence level: high/medium/low                              │
+│                                                                             │
+│ INPUT: question                                                             │
+│                                                                             │
+│ LLM OUTPUT:                                                                 │
+│   {                                                                         │
+│     "subject": "数学" | "物理" | "化学" | "生物" | "计算机科学" | "其他",    │
+│     "confidence": "high" | "medium" | "low"                               │
+│   }                                                                         │
+│                                                                             │
+│ OUTPUT FIELDS: subject_tag, subject_conf                                   │
+│                                                                             │
+│ KEEP RATE: 100% (classification always succeeds)                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      ↓
+
+FINAL OUTPUT
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Open-Ended STEM Questions (open_ended dataset format)                      │
+│                                                                             │
+│ Fields: question, subject_tag, subject_conf, + other open_ended fields     │
+│ Format: JSONL                                                               │
+│ Example: {                                                                  │
+│   "question": "请说明DNA复制的机制和过程...",                               │
+│   "subject_tag": "生物",                                                    │
+│   "subject_conf": "high",                                                   │
+│   "text": "<answer text>",                                                  │
+│   "title": "<question title>"                                              │
+│ }                                                                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+CUMULATIVE RETENTION
+═══════════════════════════════════════════════════════════════════════════════
+
+Input: 20,000 samples
+  ↓ Step 0 (Preprocessing): 20,000 × 0.98 = 19,600
+  ↓ Step 1 (LLM Rewrite): 19,600 × 1.00 = 19,600
+  ↓ Step 2 (Answer Leak Filter): 19,600 × 0.87 = 17,052 ★ (PRIMARY FILTER)
+  ↓ Step 3 (N-gram Filter): 17,052 × 0.95 = 16,199
+  ↓ Step 4 (Column Align): 16,199 × 1.00 = 16,199
+  ↓ Step 5 (Subject Tag): 16,199 × 1.00 = 16,199
+
+Final Output: ~16,000 samples (80% retention from input)
+
+KEY RETENTION FACTORS:
+- Step 0: Data quality issues (~2% loss)
+- Step 2: Answer leakage detection (~13% loss) ★ PRIMARY BOTTLENECK
+- Step 3: Over-rewriting (too much change) (~5% loss)
+
+PROMPT CLASSES & FILES
+═══════════════════════════════════════════════════════════════════════════════
+
+File: /data/workspace/DataFlow/dataflow/prompts/reasoning/stem.py
+
+┌─ StemMCRewritePrompt (lines 181-298)
+│  ├─ Purpose: Rewrite MC stem to neutral open-ended
+│  ├─ Languages: Chinese (ZH) + English (EN) auto-detection
+│  ├─ Method: build_prompt(question, options) → str
+│  ├─ Few-shot: 2 CN + 2 EN examples
+│  └─ Output: Rewritten question text
+│
+├─ StemMCAnswerLeakDetectionPrompt (lines 300-363)
+│  ├─ Purpose: Verify no answer leakage in rewrite
+│  ├─ Language: English
+│  ├─ Method: build_prompt(question, answer_label, options) → str
+│  ├─ Output: JSON {has_leak, leak_type, confidence}
+│  └─ Leak types: 5 types identified (see above)
+│
+├─ StemSubjectTaggingPrompt (lines 142-178)
+│  ├─ Purpose: Classify question to STEM subject
+│  ├─ Language: Chinese
+│  ├─ Method: build_prompt(question) → str
+│  ├─ Subjects: 6 categories (Math, Physics, Chemistry, Biology, CS, Other)
+│  └─ Output: JSON {subject, confidence}
+│
+├─ StemTrueFalseRewritePrompt (lines 20-107) [Reference]
+│  ├─ Purpose: Rewrite T/F statement to open-ended
+│  ├─ Languages: Chinese (ZH) + English (EN)
+│  └─ Similar to MC prompt but for T/F format
+│
+└─ StemAnswerLeakDetectionPrompt (lines 109-139) [Reference]
+   ├─ Purpose: Verify T/F answer not leaked
+   └─ Simpler than MC version
+
+OPERATOR CLASSES & INTEGRATION
+═══════════════════════════════════════════════════════════════════════════════
+
+Step 0: StemMCPreprocessorFilter
+  File: /data/workspace/DataFlow/dataflow/operators/reasoning/filter/
+         stem_mc_preprocessor_filter.py
+  Type: OperatorABC (rule-based)
+  Methods: 
+    - _extract_core_proposition(question) → str
+    - _normalize_answer(raw) → str
+    - _fix_m1_format(question) → str
+    - _extract_options(question) → dict
+  Regex Patterns:
+    - Wrapper: "题目：{...}" | "题目：「...」" | etc.
+    - M1 Inline: Detect "A. B. C. D" without line breaks
+    - Option Line: "^([ABCD])[.、．:\s]\s*(.+)$"
+  Input Fields: question, text
+  Output Fields: question_clean, answer_label, options_text, 
+                 option_a/b/c/d, num_options
+
+Step 1: StemMCToOpenEndedRewriterGenerator
+  File: /data/workspace/DataFlow/dataflow/operators/reasoning/generate/
+         stem_mc_to_openended_rewriter_generator.py
+  Type: OperatorABC (LLM-based)
+  Prompt: StemMCRewritePrompt
+  Methods:
+    - _postprocess(raw) → str (removes prefixes, think tags, markdown)
+  Post-processing: Removes "改写后:", "Rewritten:", <think>...</think>, markdown
+  Input: question_clean, options_text
+  Output: question_rewritten
+
+Step 2: StemMCAnswerLeakFilter
+  File: /data/workspace/DataFlow/dataflow/operators/reasoning/filter/
+         stem_mc_answer_leak_filter.py
+  Type: OperatorABC (LLM Judge)
+  Prompt: StemMCAnswerLeakDetectionPrompt
+  Methods:
+    - _parse_judgement(response) → bool (returns "should_keep")
+  Parsing: Extracts "has_leak" from JSON, returns "not has_leak"
+  Input: question_rewritten, answer_label, options_text
+  Output: Filtered dataframe (only non-leaked samples kept)
+
+Step 3: ReasoningAnswerNgramFilter
+  File: /data/workspace/DataFlow/dataflow/operators/reasoning/filter/
+         (generic reasoning module)
+  Type: OperatorABC (rule-based)
+  Config: min_score=0.3, max_score=1.0, ngrams=5
+  Logic: Keep if ≥30% new n-grams
+  Input: question_clean (reference), question_rewritten (text)
+  Output: Filtered dataframe
+
+Step 4: StemColumnAlignGenerator
+  File: /data/workspace/DataFlow/dataflow/operators/reasoning/generate/
+         stem_column_align_generator.py
+  Type: OperatorABC (rule-based)
+  Operation: Rename + Column selection
+  Kept Columns: answer_model, dataset_name, id, not_zh, ori,
+                std_answer_model, text, title, question
+  Input: question_rewritten
+  Output: question (renamed), aligned columns
+
+Step 5: StemSubjectTaggerSampleEvaluator
+  File: /data/workspace/DataFlow/dataflow/operators/reasoning/eval/
+         stem_subject_tagger_sample_evaluator.py
+  Type: OperatorABC (LLM-based)
+  Prompt: StemSubjectTaggingPrompt
+  Input: question
+  Output: subject_tag, subject_conf
+
+PIPELINE CONFIGURATION (stem_mc_to_openended_pipeline.py)
+═══════════════════════════════════════════════════════════════════════════════
+
+Class: StemMCToOpenEndedPipeline
+
+Storage:
+  FileStorage(
+    first_entry_file_name="/data/workspace/stem_mc_sample_20k.jsonl",
+    cache_path="./cache_stem_mc_rewrite",
+    file_name_prefix="mc_rewrite_step",
+    cache_type="jsonl"
+  )
+
+LLM Serving:
+  APILLMServing_request(
+    api_url=os.environ.get("DF_API_URL", "https://api.openai.com/v1/chat/completions"),
+    key_name_of_api_key="DF_API_KEY",
+    model_name=os.environ.get("DF_MODEL_NAME", "gpt-4o"),
+    max_workers=400,
+    read_timeout=1800,
+    connect_timeout=600
+  )
+
+Environment Variables:
+  - DF_API_URL: LLM API endpoint (default: OpenAI)
+  - DF_API_KEY: API authentication key
+  - DF_MODEL_NAME: Model name (default: gpt-4o)
+
+USAGE
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Set environment variables:
+   export DF_API_URL="https://your-api/v1/chat/completions"
+   export DF_API_KEY="your-key"
+   export DF_MODEL_NAME="your-model"
+
+2. Prepare input JSONL:
+   {"question": "题目：{...}", "text": "ABCD"}
+   {"question": "题目：{...}", "text": "A,B"}
+   ...
+
+3. Run pipeline:
+   cd /data/workspace/DataFlow
+   python -m dataflow.statics.pipelines.api_pipelines.stem_mc_to_openended_pipeline
+
+4. Check output:
+   ls -lah ./cache_stem_mc_rewrite/
+   - mc_rewrite_step0.jsonl (after preprocessing)
+   - mc_rewrite_step1.jsonl (after rewriting)
+   - mc_rewrite_step2.jsonl (after leak filter)
+   - mc_rewrite_step3.jsonl (after n-gram filter)
+   - mc_rewrite_step4.jsonl (after column align)
+   - mc_rewrite_step5.jsonl (after subject tagging)
+
+DOCUMENTATION FILES GENERATED
+═══════════════════════════════════════════════════════════════════════════════
+
+1. STEM_MC_PIPELINE_ANALYSIS.md
+   - Comprehensive pipeline documentation
+   - Directory structure
+   - Architecture details
+   - Prompt class descriptions
+   - Integration examples
+
+2. STEM_PROMPT_TEMPLATES.md
+   - Quick reference for prompt classes
+   - Full template text (Chinese + English)
+   - Method signatures
+   - Expected output formats
+   - Code examples
+
+3. STEM_PIPELINE_ARCHITECTURE.txt (this file)
+   - ASCII diagrams of pipeline flow
+   - Data transformations at each step
+   - Retention rates
+   - Configuration details
+
+═══════════════════════════════════════════════════════════════════════════════
