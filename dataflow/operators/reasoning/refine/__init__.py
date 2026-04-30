@@ -25,20 +25,23 @@ CoTChunkCompressRefiner
     core / exploration / verification / transition, and applies
     type-specific LLM compression.
 
-CoTPatternRefiner
-    Method D – Thinking-Pattern nine-class classification and differential
-    handling (Think Wisely style).
-    Classifies fragments into one of nine Thinking Pattern types and applies
-    keep / compress / delete based on the type.
+CoTMathNormRefiner
+    Rule-based LaTeX / math formula normaliser (zero LLM calls).
+    Applies a configurable set of regex transformations only inside math
+    regions to standardise notation output by Method A or Method D.
 """
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .cot_llm_judge_refiner import CoTLLMJudgeRefiner
+    from .cot_llm_judge_refiner_fast import CoTLLMJudgeRefinerFast
     from .cot_monte_carlo_refiner import CoTMonteCarloRefiner
     from .cot_chunk_compress_refiner import CoTChunkCompressRefiner
+    from .cot_chunk_compress_refiner_fast import CoTChunkCompressRefinerFast
     from .cot_pattern_refiner import CoTPatternRefiner
+    from .cot_pattern_refiner_fast import CoTPatternRefinerFast
+    from .cot_math_norm_refiner import CoTMathNormRefiner
 
 else:
     import sys

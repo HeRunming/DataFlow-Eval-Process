@@ -437,3 +437,157 @@ class CoTPatternRefinePrompt(PromptABC):
             "  • Output only the compressed text, no preamble.\n\n"
             "Compressed fragment:"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Combined judge + compress prompts (used by the Fast variants A / D).
+#
+# Rationale: the two-phase (classify then compress) design issues two LLM
+# round-trips per compressible step/fragment.  Because the compress rewrite
+# is short and stateless, we can ask the judge to emit it in the SAME
+# response, cutting call count by up to 50% on A and D.  The judge is still
+# asked to output strict JSON so downstream parsing is unambiguous.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@PROMPT_REGISTRY.register()
+class CoTStepJudgeCompressPrompt(PromptABC):
+    """
+    Combined step-level prompt used by ``CoTLLMJudgeRefinerFast``.
+
+    Asks the judge to both label the step (necessary / redundant /
+    compressible) AND, if compressible, emit the one-sentence compression
+    in the same JSON response.
+
+    Response schema:
+        {
+          "label":      "necessary|redundant|compressible",
+          "reason":     "<one sentence>",
+          "compressed": "<one sentence compression, only if label==compressible>"
+        }
+
+    The ``compressed`` field is ignored for non-compressible labels.
+    """
+
+    def __init__(self):
+        pass
+
+    def build_prompt(self, problem: str, step: str) -> str:
+        return (
+            "You are reviewing a single step extracted from a chain-of-thought "
+            "reasoning trace.  Classify the step AND, if it is compressible, "
+            "emit a one-sentence compression in the SAME JSON response.\n"
+            f"\nProblem:\n{problem}\n"
+            f"\nStep to evaluate:\n<step>\n{step}\n</step>\n\n"
+            "Labels:\n"
+            '  "necessary"    - Introduces a new sub-result, numerical value, '
+            'or a key logical transition required to reach the final answer.\n'
+            '  "redundant"    - Repeats already-established information, '
+            're-verifies something already verified, or is a dead-end whose '
+            'conclusion is never used.\n'
+            '  "compressible" - Contains useful information but is '
+            'over-explained; it can be summarised in one sentence without '
+            'information loss.\n\n'
+            "Rules for the \"compressed\" field (only when label == \"compressible\"):\n"
+            "  * One sentence, same language as the original step.\n"
+            "  * Preserve ALL numerical values and intermediate conclusions.\n"
+            "  * Do NOT introduce new information.\n\n"
+            "Return ONLY a JSON object, no extra text:\n"
+            "{\n"
+            '  "label":      "necessary|redundant|compressible",\n'
+            '  "reason":     "<one sentence>",\n'
+            '  "compressed": "<one sentence or empty string>"\n'
+            "}"
+        )
+
+
+@PROMPT_REGISTRY.register()
+class CoTPatternClassifyCompressPrompt(PromptABC):
+    """
+    Combined nine-type pattern prompt used by ``CoTPatternRefinerFast``.
+
+    The same JSON also carries a compressed rewrite when the action is
+    "compress", removing the need for a second LLM call on those fragments.
+
+    Response schema:
+        {
+          "type":            "<one of the nine pattern types>",
+          "key_information": "<brief>",
+          "recommendation":  "keep|compress|delete",
+          "compressed":      "<compressed text, only if recommendation=='compress'>"
+        }
+
+    For ``keep`` the original fragment is used; for ``delete`` the fragment
+    is dropped.  Only the ``compress`` case consumes the ``compressed``
+    field.
+    """
+
+    PATTERN_DESCRIPTIONS = {
+        "CORE_REASONING":          "Derives a new intermediate result or makes a key logical step.",
+        "NECESSARY_EXPLORATION":   "Explores a path that is abandoned but the failure is informative (rules out a case).",
+        "UNNECESSARY_EXPLORATION": "Explores a dead-end path whose conclusion is never used.",
+        "NECESSARY_VERIFICATION":  "Discovers an error in a previous step or confirms a non-obvious result.",
+        "REDUNDANT_VERIFICATION":  "Re-verifies something already established without new insight.",
+        "PREAMBLE":                "Restates the problem or plans without introducing new content.",
+        "TRANSITION":              "Connecting language, hedging, or filler with minimal semantic content.",
+        "COMPUTATION":             "Executes arithmetic or algebraic calculation steps.",
+        "CONCLUSION":              "States a final or intermediate answer.",
+    }
+
+    def __init__(self):
+        pass
+
+    def build_prompt(self, problem: str, fragment: str) -> str:
+        type_lines = "\n".join(
+            f'- "{k}": {v}' for k, v in self.PATTERN_DESCRIPTIONS.items()
+        )
+        return (
+            "Analyze the reasoning fragment and, in the SAME JSON response, "
+            "classify it AND produce a faithful summary of what the fragment "
+            "contributes.  Downstream code decides whether to keep, compress, "
+            "or drop the fragment, so ALWAYS fill the \"compressed\" field "
+            "with a summary that could replace the original if needed.\n"
+            f"\nProblem:\n{problem}\n"
+            f"\nFragment:\n<fragment>\n{fragment}\n</fragment>\n\n"
+            "Pattern types:\n"
+            f"{type_lines}\n\n"
+            "Rules for the \"compressed\" field:\n"
+            "  * CORE_REASONING / COMPUTATION / CONCLUSION / "
+            "NECESSARY_VERIFICATION -> one faithful sentence that "
+            "preserves EVERY numerical value, intermediate result, and "
+            "logical operator.\n"
+            "  * NECESSARY_EXPLORATION and UNNECESSARY_EXPLORATION -> "
+            "2-3 sentences that keep a real trace of the attempt.  You "
+            "MUST include:\n"
+            "    (i) the concrete action taken (name the approach AND "
+            "write at least one equation, identity, substitution, or "
+            "theorem it used);\n"
+            "    (ii) how far the attempt progressed before it stalled "
+            "(e.g. \"reached x⁴ + 16x² = (8+2b)², which has no rational "
+            "factorisation\"; \"got (p² - q²)² = 256 + (16+4b)², no "
+            "closed form for p, q\");\n"
+            "    (iii) the SPECIFIC reason it was abandoned, not a "
+            "generic \"too complex / inconclusive\".\n"
+            "    DO NOT use the template \"Considered X, but abandoned "
+            "Y\" -- write in the same natural tone as the original "
+            "fragment, varying wording across fragments.  Short "
+            "declarative sentences are fine; templated phrasing is not.\n"
+            "  * REDUNDANT_VERIFICATION -> one short sentence, e.g. "
+            "\"Re-verified: [result].\"\n"
+            "  * PREAMBLE -> one short sentence stating the setup, e.g. "
+            "\"Setting up part (ii).\"\n"
+            "  * TRANSITION -> a brief connecting phrase (\"Next,\", "
+            "\"Therefore,\", etc.).\n"
+            "  * Preserve every numerical value and key conclusion the "
+            "fragment carries.\n\n"
+            "The \"recommendation\" field is advisory only; put whichever "
+            "of keep|compress|delete best matches the fragment.\n\n"
+            "Return ONLY JSON, no extra text:\n"
+            "{\n"
+            '  "type":            "<PATTERN_TYPE>",\n'
+            '  "key_information": "<brief key result or conclusion>",\n'
+            '  "recommendation":  "keep|compress|delete",\n'
+            '  "compressed":      "<non-empty compressed text>"\n'
+            "}"
+        )
+

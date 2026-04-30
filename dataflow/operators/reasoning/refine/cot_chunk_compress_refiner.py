@@ -59,15 +59,15 @@ _TRANSITION_KEYWORDS = [
     r"\blet me re-?examine\b", r"\bhold on\b",
     # New approach
     r"\blet me try\b", r"\banother approach\b", r"\balternatively\b",
-    r"\ba different (way|method|approach)\b",
-    r"\blet'?s think (about this )?differently\b",
+    r"\ba different (?:way|method|approach)\b",
+    r"\blet'?s think (?:about this )?differently\b",
     # Verification
     r"\blet me verify\b", r"\blet me check\b", r"\bto confirm\b",
     r"\bdouble-?check\b", r"\blet me make sure\b",
     # Conclusion
     r"\bso,?\b", r"\btherefore,?\b", r"\bthus,?\b",
     r"\bin summary\b", r"\bto summarize\b",
-    r"\bthe (final )?answer is\b",
+    r"\bthe (?:final )?answer is\b",
 ]
 
 # Per-chunk-type target retention ratios (used in the compress prompt).
@@ -367,7 +367,7 @@ class CoTChunkCompressRefiner(OperatorABC):
 
         for chunk, cls in zip(chunks, classifications):
             chunk_type = cls.get("type", "core")
-            key_info = cls.get("key_info", "")
+            key_info = cls.get("key_info") or ""
 
             # Safety: unknown types treated as core
             if chunk_type not in _TYPE_RATIOS:

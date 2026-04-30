@@ -28,9 +28,13 @@ if TYPE_CHECKING:
 
     # refine – long-CoT post-processing (offline compression / cleaning)
     from .refine.cot_llm_judge_refiner import CoTLLMJudgeRefiner
+    from .refine.cot_llm_judge_refiner_fast import CoTLLMJudgeRefinerFast
     from .refine.cot_monte_carlo_refiner import CoTMonteCarloRefiner
     from .refine.cot_chunk_compress_refiner import CoTChunkCompressRefiner
+    from .refine.cot_chunk_compress_refiner_fast import CoTChunkCompressRefinerFast
     from .refine.cot_pattern_refiner import CoTPatternRefiner
+    from .refine.cot_pattern_refiner_fast import CoTPatternRefinerFast
+    from .refine.cot_math_norm_refiner import CoTMathNormRefiner
 
 else:
     import sys

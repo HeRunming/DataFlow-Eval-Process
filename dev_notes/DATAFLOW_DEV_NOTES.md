@@ -516,13 +516,290 @@ export DF_LOGGING_LEVEL=INFO   # DEBUG / INFO / WARNING / ERROR
 
 ---
 
-## 五、版本变更记录
+## 五、Pipeline 开发实战指南
+
+> 本节基于 2026-03-30 实际开发 CoT 清洗 Pipeline 的经验总结，供下次写 Pipeline 直接参考。
+
+### 5.1 DataFlow Pipeline 的标准风格
+
+DataFlow 现有 Pipeline 均采用**"类封装 + forward 串行调用"**风格，无基类继承要求（注释中提到"未来或许有基类"，目前没有）。
+
+**标准模板**（对标 `reasoning_math_pipeline.py` / `Reasoning_CPUPipeline`）：
+
+```python
+from dataflow.utils.storage import FileStorage
+from dataflow.serving import APILLMServing_request
+from dataflow.operators.reasoning import CoTLLMJudgeRefiner  # 按需导入
+
+class MyCotCleanPipeline:
+    def __init__(self):
+        # 1. Storage：定义输入文件和 cache 路径
+        self.storage = FileStorage(
+            first_entry_file_name="./input.jsonl",
+            cache_path="./cache",
+            file_name_prefix="dataflow_cache",
+            cache_type="jsonl",
+        )
+
+        # 2. LLM Serving：统一声明，算子共享或按需分开
+        self.llm_serving = APILLMServing_request(
+            api_url="http://your-api/v1/chat/completions",
+            key_name_of_api_key="DF_API_KEY",   # 从环境变量读取 key
+            model_name="gpt-4o",
+            max_workers=200,   # 高并发时调大，默认不要用 10 或更小
+        )
+
+        # 3. 算子：按执行顺序依次声明为成员变量，命名带 _stepN 后缀
+        self.refiner_step1 = CoTLLMJudgeRefiner(
+            llm_serving=self.llm_serving,
+            min_steps_to_keep=2,
+        )
+        self.another_op_step2 = ...
+
+    def forward(self):
+        # 每个算子调用时传入 storage.step()（每次调用自动递增步骤计数器）
+        self.refiner_step1.run(
+            storage=self.storage.step(),
+            input_key="cot",
+            output_key="cot_cleaned",
+        )
+        self.another_op_step2.run(
+            storage=self.storage.step(),
+            input_key="cot_cleaned",
+        )
+
+if __name__ == "__main__":
+    pipeline = MyCotCleanPipeline()
+    pipeline.forward()
+```
+
+**关键约定：**
+
+| 要点 | 说明 |
+|------|------|
+| `storage` 声明在 `__init__` | 与算子一起，不在 `forward()` 里临时创建 |
+| `storage.step()` 在 `forward()` 里调用 | 每个算子调用传一次，自动递增；**不要在外部提前手动 step()** |
+| 算子成员变量命名 | `self.xxx_stepN`，N 为执行顺序，便于阅读 |
+| LLM Serving 统一声明 | 多个算子可共享同一个 serving 实例，节省连接 |
+| `if __name__ == "__main__"` | 每个 Pipeline 文件都加，方便直接运行 |
+
+---
+
+### 5.2 storage.step() 的正确用法
+
+**坑点**：`FileStorage` 的 `operator_step` 初始值为 `-1`，必须通过 `step()` 推进后才能 `read()`/`write()`。
+
+**两种用法的区别：**
+
+```python
+# ✅ Pipeline 标准用法：在 forward() 里每次调用时传 storage.step()
+self.op1.run(storage=self.storage.step(), ...)  # step: -1 → 0，读 step0 写 step1
+self.op2.run(storage=self.storage.step(), ...)  # step: 0 → 1，读 step1 写 step2
+
+# ✅ 独立测试脚本用法（算子不在 Pipeline 中）：手动调用一次 step()
+storage = FileStorage("input.jsonl", cache_path="./cache", ...)
+storage.step()           # 手动推进：-1 → 0
+op.run(storage=storage, input_key="cot", ...)  # 读 step0，写 step1
+```
+
+**⚠️ 不要在独立脚本中把 `storage.step()` 写进 `op.run()` 的参数**，因为这会返回一个递增后的对象——在脚本里直接传 `storage` 即可，手动 `step()` 一次就够了。
+
+---
+
+### 5.3 LazyLoader 与算子 import 路径的坑
+
+**背景**：DataFlow 使用 `LazyLoader` 机制（在 `__init__.py` 的 `else` 分支）管理算子的懒加载，避免启动时一次性 import 所有依赖。
+
+**表现**：`__init__.py` 中算子是**扁平化注册**在父模块层级，而非子包路径。
+
+**错误示范（会报 ModuleNotFoundError）：**
+```python
+# ❌ 直接用子包路径 import
+from dataflow.operators.reasoning.refine.cot_llm_judge_refiner import CoTLLMJudgeRefiner
+```
+
+**正确做法（从父模块 import）：**
+```python
+# ✅ 从注册了 LazyLoader 的父模块 import
+from dataflow.operators.reasoning import CoTLLMJudgeRefiner
+from dataflow.operators.reasoning import CoTMonteCarloRefiner, CoTChunkCompressRefiner, CoTPatternRefiner
+```
+
+**原理**：`dataflow/operators/reasoning/__init__.py` 的 `else` 分支通过 `LazyLoader` 将所有子包（包括 `refine/`、`generate/`、`filter/`）的算子类**扁平注册**到 `dataflow.operators.reasoning` 这一命名空间，使用子包路径直接 import 会绕过这个机制。
+
+**验证已注册的算子：**
+```python
+import dataflow.operators.reasoning as r
+print(r._import_structure)  # 查看 LazyLoader 管理的所有类名及其文件路径
+```
+
+---
+
+### 5.4 APILLMServing_request 并发配置
+
+`APILLMServing_request` 使用 `ThreadPoolExecutor` 实现并发，`max_workers` 控制并发线程数。
+
+**默认值（原始代码）为 10，极大低估了 API 能力。**
+
+| API 情况 | 推荐 max_workers |
+|---------|----------------|
+| 官方 OpenAI / DeepSeek（有限速） | 50–100 |
+| 自建/代理 API（200-400 并发支持） | 200–300 |
+| 本地 vLLM（单机） | 50–100 |
+
+**在 Pipeline 中配置：**
+```python
+self.llm_serving = APILLMServing_request(
+    api_url="http://your-api/v1/chat/completions",
+    key_name_of_api_key="DF_API_KEY",
+    model_name="gpt-5.1",
+    max_workers=200,   # ← 根据 API 并发能力调整
+)
+```
+
+**也可通过环境变量动态控制（需在脚本中读取）：**
+```python
+max_workers = int(os.environ.get("DF_MAX_WORKERS", "200"))
+```
+
+**本次实验教训**：最初 `max_workers=4`，20 条数据、每条 ~30K 字符的 CoT，Method A 跑了约 1 小时；调整为 200 后预计速度提升 10–20 倍。
+
+---
+
+### 5.5 CoT 清洗算子的 import 与使用总结
+
+四个算子均在 `dataflow/operators/reasoning/refine/` 下，通过父模块导入：
+
+```python
+from dataflow.operators.reasoning import (
+    CoTLLMJudgeRefiner,       # Method A：LLM-Judge 步骤级过滤
+    CoTMonteCarloRefiner,     # Method B：Monte Carlo 重要性评分（需 answer_key）
+    CoTChunkCompressRefiner,  # Method C：Chunk 级别分类 + 差异化压缩
+    CoTPatternRefiner,        # Method D：Thinking Pattern 九分类处理
+)
+```
+
+**run() 参数约定：**
+```python
+op.run(
+    storage          = storage,        # FileStorage 实例（已 step()）
+    input_key        = "cot",          # 输入列名（含 <think> 的长 CoT）
+    output_key       = "cot_cleaned",  # 输出列名
+    output_stats_key = "cot_clean_stats",  # 统计信息列（JSON 字符串）
+    problem_key      = "problem",      # 问题列名（用于 Judge 时的上下文）
+)
+```
+
+**stats 字段结构（`cot_clean_stats` 列中每行的 JSON）：**
+```json
+{
+  "original_chars": 30000,
+  "output_chars": 15000,
+  "skipped": false
+}
+```
+
+**数据预处理**：原始数据集字段需统一重命名：
+- `output` → `cot`（算子读取的列名）
+- `instruction` + `input` → `problem`（问题上下文）
+
+---
+
+### 5.6 实验脚本参考
+
+完整可运行的 CoT 清洗 Pipeline 见：
+`dev_notes/run_cot_clean_test.py`
+
+运行方式：
+```bash
+export DF_API_KEY="sk-xxx"
+export DF_API_URL="http://123.129.219.111:3000/v1/chat/completions"
+export DF_MODEL_NAME="gpt-5.1"
+export DF_MAX_WORKERS=200   # 可选，默认 200
+
+source /data/workspace/miniconda3/etc/profile.d/conda.sh
+conda activate dataflow
+cd /data/workspace/cc_workspace/DataFlow/dev_notes
+python run_cot_clean_test.py
+```
+
+---
+
+## 六、Python re.split() 与捕获组陷阱（通用 Bug 模式）
+
+### 6.1 问题描述
+
+`CoTChunkCompressRefiner` 的 `_split_into_chunks()` 函数在切分 CoT 文本时，对所有 20 条数据均抛出：
+
+```
+AttributeError: 'NoneType' object has no attribute 'strip'
+```
+
+### 6.2 根本原因
+
+**Python `re.split()` 的一个常被忽略的行为**：
+
+> 如果 pattern 中包含**捕获组** `(...)`，则 `re.split()` 会将每个捕获组的匹配内容也插入到结果列表中。
+> 若捕获组是 **optional** 的（如 `(...)?`），且该次匹配中该组未实际匹配，则插入 `None`。
+
+触发该问题的三个正则表达式：
+
+```python
+# 问题代码（_TRANSITION_KEYWORDS 中的三条）
+r"\ba different (way|method|approach)\b"      # (way|...) 是捕获组
+r"\blet'?s think (about this )?differently\b" # (about this )? → 未匹配时插入 None
+r"\bthe (final )?answer is\b"                 # (final )? → 未匹配时插入 None
+```
+
+验证示例：
+
+```python
+import re
+pattern = re.compile(r"(?<=[.!?])\s+(?=\bthe (final )?answer is\b)", re.IGNORECASE)
+result = pattern.split("We work. The answer is 42.")
+# → ['We work.', None, 'The answer is 42.']
+#                  ^^^^  optional group 未匹配 → None
+```
+
+结果列表中混入 `None`，随后 `s.strip()` 抛出 `AttributeError`。
+
+### 6.3 修复方法
+
+将所有捕获组改为 **non-capturing group** `(?:...)`：
+
+```python
+# 修复后
+r"\ba different (?:way|method|approach)\b"
+r"\blet'?s think (?:about this )?differently\b"
+r"\bthe (?:final )?answer is\b"
+```
+
+### 6.4 通用规范建议
+
+**凡在 `re.split()` 的 pattern 中书写正则时**：
+
+1. **分组只用于逻辑分组，一律使用 `(?:...)`**，除非明确需要将捕获内容插入结果列表。
+2. 如果 pattern 里不得不用捕获组，split 后对结果过滤 `None`：
+   ```python
+   parts = [s for s in pattern.split(text) if s is not None]
+   ```
+3. **代码 review checklist**：凡用 `re.split()` 且 pattern 含 `(`，检查是否应改为 `(?:`。
+
+### 6.5 受影响范围
+
+此 bug 在 DataFlow 代码库中具有一定普遍性，任何使用 `re.split()` + 含捕获组 pattern 的地方均有风险。
+
+---
+
+## 七、版本变更记录
 
 | 日期 | 事件 |
 |------|------|
 | 2026-03-29 | 初始化协同开发规范文件，基于 cc 分支 v1.0.10 |
 | 2026-03-29 | 新增 §1.7 算子复用原则、§1.8 算子健壮性与容错规范、§1.9 推理模型 CoT 输出处理规范 |
+| 2026-03-30 | 新增 §五 Pipeline 开发实战指南（LazyLoader 坑、storage.step() 用法、并发配置、CoT 清洗算子总结） |
+| 2026-03-30 | 新增 §六 re.split() 捕获组 Bug 记录（CoTChunkCompressRefiner NoneType 问题复盘） |
 
 ---
 
-*最后更新：2026-03-29*
+*最后更新：2026-03-30*
