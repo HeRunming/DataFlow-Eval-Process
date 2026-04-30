@@ -1,0 +1,123 @@
+{
+  "method_A": [
+    [
+      163,
+      "\\$120,\\!000 \\text{ in the 4\\% account and } \\$60,\\!000 \\text{ in the 8\\% account}",
+      "None"
+    ],
+    [
+      177,
+      "2 + \\frac{\\pi}{2}",
+      "None"
+    ],
+    [
+      232,
+      "\\text{For closure, add one new segment to } L_1 \\text{ or } L_2 \\text{ and one to } L_3.",
+      "None"
+    ],
+    [
+      379,
+      "T_n = \\frac{(5 + \\sqrt{11})^{n+1} - (5 - \\sqrt{11})^{n+1}}{2^{n} \\sqrt{11}}",
+      "None"
+    ],
+    [
+      543,
+      "10",
+      "None"
+    ],
+    [
+      867,
+      "\\$523",
+      "None"
+    ],
+    [
+      957,
+      "k = \\frac{\\sqrt{3}}{3}",
+      "None"
+    ],
+    [
+      1390,
+      "0",
+      "None"
+    ],
+    [
+      2186,
+      "y = \\frac{1}{e} - 1",
+      "None"
+    ],
+    [
+      2231,
+      "\\frac{30 + 10\\sqrt{69}}{2}",
+      "None"
+    ],
+    [
+      2810,
+      "\\text{No other distinct tilings are possible under the constraints.}",
+      "None"
+    ],
+    [
+      3487,
+      "m = 1 + \\sqrt{3} \\text{ and } m = 1 - \\sqrt{3}",
+      "None"
+    ],
+    [
+      3798,
+      "44",
+      "None"
+    ],
+    [
+      3905,
+      "\\text{None}",
+      "None"
+    ],
+    [
+      6357,
+      "C",
+      "None"
+    ],
+    [
+      7374,
+      "None",
+      "(d) \\; 32.4\\%"
+    ],
+    [
+      7716,
+      "D",
+      "None"
+    ],
+    [
+      8130,
+      "n",
+      "None"
+    ]
+  ],
+  "method_C": [
+    [
+      1041,
+      "-\\frac{\\sqrt{73}}{2} < b < \\frac{\\sqrt{73}}{2}",
+      "None"
+    ],
+    [
+      2810,
+      "\\text{No other distinct tilings are possible under the constraints.}",
+      "None"
+    ],
+    [
+      7374,
+      "None",
+      "(d) \\; 32.4\\%"
+    ]
+  ],
+  "method_D": [
+    [
+      6357,
+      "C",
+      "None"
+    ],
+    [
+      7374,
+      "None",
+      "(d) \\; 32.4\\%"
+    ]
+  ]
+}
