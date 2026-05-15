@@ -36,6 +36,9 @@ if TYPE_CHECKING:
     from .refine.cot_pattern_refiner_fast import CoTPatternRefinerFast
     from .refine.cot_math_norm_refiner import CoTMathNormRefiner
 
+    # midtrain_cot – Long-CoT -> Medium-CoT distillation for midtraining
+    from .midtrain_cot.cot_midtrain_medium_refiner import CoTMidtrainMediumRefiner
+
 else:
     import sys
     from dataflow.utils.registry import LazyLoader, generate_import_structure_from_type_checking
