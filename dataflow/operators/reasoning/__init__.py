@@ -26,6 +26,14 @@ if TYPE_CHECKING:
     from .filter.reasoning_question_filter import ReasoningQuestionFilter
     from .filter.reasoning_answer_model_judge_filter import ReasoningAnswerModelJudgeFilter
 
+    # refine / cleaning
+    from .cot_trace_cleaning import CoTTraceExtractor
+    from .cot_trace_cleaning import CoTTraceGraphBuilder
+    from .cot_trace_cleaning import CoTPruningPlanner
+    from .cot_trace_cleaning import CoTBridgeAndReconstructor
+    from .cot_trace_cleaning import CoTCleaningVerifier
+    from .cot_trace_cleaning import PruningConfig
+
 else:
     import sys
     from dataflow.utils.registry import LazyLoader, generate_import_structure_from_type_checking
