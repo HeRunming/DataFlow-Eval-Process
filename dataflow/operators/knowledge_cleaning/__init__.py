@@ -4,6 +4,7 @@ if TYPE_CHECKING:
     # filter
     from .generate.kbc_chunk_generator import KBCChunkGenerator
     from .generate.kbc_chunk_generator_batch import KBCChunkGeneratorBatch
+    from .generate.kbc_table_context_chunk_generator import KBCTableContextChunkGenerator
     # from .generate.file_or_url_to_markdown_converter import FileOrURLToMarkdownConverter
     from .generate.mineru_operators import FileOrURLToMarkdownConverterLocal
     from .generate.mineru_operators import FileOrURLToMarkdownConverterAPI
